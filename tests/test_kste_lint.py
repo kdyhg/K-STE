@@ -93,5 +93,124 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
 
 
+class OutputAndBidirectionalTests(unittest.TestCase):
+    def test_input_default_ignores_ai_explanation(self):
+        source = "## 기술 설명\n이것은 무조건 빠릅니다.\n## 작업 요구사항\n이거 수정해 줘.\n"
+        result = lint(source, {"requirements"})
+        self.assertEqual(result["selected_lines"], 1)
+        self.assertEqual({f["direction"] for f in result["findings"]}, {"input"})
+
+    def test_output_technical_section(self):
+        source = "## 작업 요구사항\n이거 수정해 줘.\n## 기술 설명\n이것은 무조건 빠릅니다.\n"
+        result = lint(source, {"technical"}, direction="output")
+        self.assertEqual(result["selected_lines"], 1)
+        self.assertEqual({f["rule"] for f in result["findings"]},
+                         {"vague_reference", "unqualified_certainty"})
+        self.assertEqual({f["line"] for f in result["findings"]}, {4})
+
+    def test_output_learning_section(self):
+        source = "## 학습 설명\n이것은 조건을 살펴봐야 합니다.\n## 오류 설명\n무조건 서버 탓입니다.\n"
+        result = lint(source, {"learning"}, direction="output")
+        self.assertEqual(result["selected_lines"], 1)
+        self.assertEqual({f["line"] for f in result["findings"]}, {2})
+
+    def test_output_error_section(self):
+        source = "## 오류 원인\n서버가 무조건 원인입니다.\n"
+        result = lint(source, {"error"}, direction="output")
+        self.assertEqual(result["findings"][0]["rule"], "unqualified_certainty")
+
+    def test_output_summary_section(self):
+        source = "## 요약\n그것은 100% 해결됩니다.\n"
+        result = lint(source, {"summary"}, direction="output")
+        self.assertEqual(result["selected_lines"], 1)
+        self.assertEqual(len(result["findings"]), 2)
+
+    def test_output_marker_explicit_direction(self):
+        source = (
+            "이거는 범위 밖입니다.\n"
+            "<!-- kste:start scope=technical direction=output -->\n"
+            "이것은 항상 옳습니다.\n"
+            "<!-- kste:end -->\n"
+            "이것도 범위 밖입니다.\n"
+        )
+        result = lint(source, {"technical"}, direction="output")
+        self.assertEqual(result["selected_lines"], 1)
+        self.assertEqual({f["line"] for f in result["findings"]}, {3})
+
+    def test_output_marker_without_direction_is_inferred(self):
+        source = "<!-- kste:start scope=learning -->\n이것을 생각합니다.\n<!-- kste:end -->\n"
+        self.assertEqual(lint(source, {"learning"}, direction="output")["selected_lines"], 1)
+
+    def test_both_selects_only_requested_sides(self):
+        source = (
+            "## 작업 요구사항\n이거 수정해 줘.\n"
+            "## 제약 조건\n그거는 그대로 두세요.\n"
+            "## 기술 설명\n이것은 무조건 맞습니다.\n"
+            "## 오류 설명\n원인을 확인했습니다.\n"
+        )
+        result = lint(source, {"input:constraints", "output:technical"}, direction="both")
+        self.assertEqual(result["selected_lines"], 2)
+        self.assertEqual({f["line"] for f in result["findings"]}, {4, 6})
+        self.assertEqual({f["direction"] for f in result["findings"]}, {"input", "output"})
+
+    def test_both_rejects_unqualified_scopes(self):
+        with self.assertRaisesRegex(ValueError, "양방향 검사"):
+            lint("## 작업 요구사항\n이거 수정해 줘.\n", {"requirements"}, direction="both")
+
+    def test_both_rejects_all(self):
+        with self.assertRaisesRegex(ValueError, "양방향 전체 검사"):
+            lint("## 요약\n이것입니다.\n", set(), all_text=True, direction="both")
+
+    def test_output_rejects_input_scope(self):
+        with self.assertRaises(ValueError):
+            lint("## 작업 요구사항\n이거 수정해 줘.\n",
+                 {"requirements"}, direction="output")
+
+    def test_output_ignores_code_fences(self):
+        source = "## 기술 설명\n\x60\x60\x60python\n이것은 무조건입니다.\n\x60\x60\x60\n이것은 맞습니다.\n"
+        self.assertEqual(lint(source, {"technical"}, direction="output")["selected_lines"], 1)
+
+    def test_cli_output_mode(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "kste_lint.py"),
+             "--direction", "output", "--scope", "technical", "--format", "json"],
+            input="## 기술 설명\n이것은 항상 정답입니다.\n",
+            text=True, capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('"unqualified_certainty"', proc.stdout)
+        self.assertIn('"direction": "output"', proc.stdout)
+
+    def test_cli_both_scope(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "kste_lint.py"),
+             "--direction", "both",
+             "--scope", "input:constraints,output:error", "--format", "json"],
+            input="## 제약 조건\n그거 유지해 줘.\n## 오류 설명\n무조건 서버 문제입니다.\n",
+            text=True, capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('"selected_lines": 2', proc.stdout)
+
+    def test_cli_both_without_qualified_scope_returns_two(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "kste_lint.py"),
+             "--direction", "both", "--scope", "requirements"],
+            input="## 작업 요구사항\n이거 수정해 줘.\n",
+            text=True, capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 2)
+
+    def test_cli_both_all_returns_two(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "kste_lint.py"),
+             "--direction", "both", "--all"],
+            input="## 요약\n그것을 확인합니다.\n",
+            text=True, capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 2)
+
+
+
 if __name__ == "__main__":
     unittest.main()
