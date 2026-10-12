@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile
+        run: python -m compileall -q scripts tests
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Check repository copy
+        run: |
+          python scripts/kste_lint.py examples/usage.md --all --format json > /dev/null
